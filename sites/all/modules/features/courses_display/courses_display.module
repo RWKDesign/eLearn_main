@@ -1,0 +1,7 @@
+<?php
+/**
+ * @file
+ * Code for the Courses Display feature.
+ */
+
+include_once 'courses_display.features.inc';
