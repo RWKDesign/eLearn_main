@@ -123,7 +123,7 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
     parent::setOutput($output_directory, $output_name, $overwrite_mode);
     $this->options['output']['label'] = 'video-' . $this->settings['input']['fid'];
     $this->options['output']['filename'] = $this->settings['filename'];
-    $this->options['output']['public'] = 1;
+    $this->options['output']['public'] = !variable_get('video_zencoder_private', FALSE);
     $baseurl = NULL;
 
     if ($this->outputdestination == 's3') {
@@ -321,6 +321,11 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
           ),
         ),
       );
+      $form['zencoder_info']['api_status'] = array(
+        '#type' => 'item',
+        '#title' => t('Zencoder API status'),
+        '#markup' => $this->getCurrentStatus(),
+      );
       $form['zencoder_info']['video_zencoder_api_key'] = array(
         '#type' => 'textfield',
         '#title' => t('Zencoder API key'),
@@ -401,13 +406,22 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
           '#title' => t('Location for Zencoder output'),
           '#default_value' => $this->outputdestination === NULL ? '' : $this->outputdestination,
           '#options' => $tempdestinations,
-          '#description' => t('Normally, Zencoder uploads its transcoded files to its own Amazon S3 bucket from which the Video module will copy the file to the final destination. Use this setting to use a different location. If the selected location is identical to the final destination, this saves resource intensive copy operations during handling of the postback.'),
+          '#description' => t('Normally, Zencoder uploads its transcoded files to its own Amazon S3 bucket from which the Video module will copy the file to the final destination. Use this setting to use a different location. If the selected location is identical to the final destination, this saves resource intensive copy operations during handling of the postback. The final destination is set per video field and defaults to the public files folder.'),
         );
 
         if (isset($tempdestinations['s3'])) {
           $form['zencoder_info']['advanced']['video_zencoder_output_destination']['#description'] .= '<br/>' .
             t('To enable Zencoder to upload directly to your Amazon S3 bucket, read the <a href="@zencoder-s3-url">Zencoder manual</a>.', array('@zencoder-s3-url' => url('https://app.zencoder.com/docs/guides/getting-started/working-with-s3')));
         }
+      }
+
+      if (module_exists('amazons3')) {
+        $form['zencoder_info']['advanced']['video_zencoder_private'] = array(
+          '#type' => 'checkbox',
+          '#title' => t('Store files on Amazon S3 privately'),
+          '#default_value' => variable_get('video_zencoder_private', FALSE),
+          '#description' => t('Files stored privately are only accessible by visitors when <a href="@amazons3-settings">Presigned URLs</a> are enabled. These URLs expire, allow you to control access to the video files. For this setting to work, you must set %destination-setting-name to Amazon S3.', array('@amazons3-settings' => url('admin/config/media/amazons3'), '%destination-setting-name' => t('Location for Zencoder output'))),
+        );
       }
     }
     return $form;
@@ -600,13 +614,13 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
     if (!file_exists($outputfile->uri) || filesize($outputfile->uri) != $output->file_size_in_bytes) {
       if (!$this->moveFile($output->url, $outputfile->uri)) {
         video_jobs::setFailed($video);
-        watchdog('transcoder', 'While processing Zencoder postback, failed to copy @source-uri to @target-uri.', array('@source-uri' => $notification->output->url, '@target-uri' => $outputfile->uri), WATCHDOG_ERROR);
+        watchdog('transcoder', 'While processing Zencoder postback, failed to copy @source-uri to @target-uri.', array('@source-uri' => $output->url, '@target-uri' => $outputfile->uri), WATCHDOG_ERROR);
         return;
       }
     }
 
     $outputfile->filesize = $output->file_size_in_bytes;
-    drupal_write_record('file_managed', $outputfile, 'fid');
+    file_save($outputfile);
 
     // Actual processing of the response
     $video->duration = round($output->duration_in_ms / 1000);
@@ -676,7 +690,6 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
       $thumbnail = (object)$thumbnail;
       $urlpath = parse_url($thumbnail->url, PHP_URL_PATH);
       $ext = video_utility::getExtension($urlpath);
-      $update = array();
       $thumb = new stdClass();
       $thumb->uid = $outputfile->uid; // $entity may not have a uid property, so take it from the output file.
       $thumb->status = FILE_STATUS_PERMANENT;
@@ -694,7 +707,6 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
           $shouldcopy = FALSE;
         }
         $thumb->fid = intval($existingthumbs[$thumb->uri]->fid);
-        $update = array('fid');
       }
 
       if ($shouldcopy && !$this->moveFile($thumbnail->url, $thumb->uri)) {
@@ -702,7 +714,7 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
         continue;
       }
 
-      drupal_write_record('file_managed', $thumb, $update);
+      file_save($thumb);
 
       // Saving to video_thumbnails and file_usage is only necessary when this is a new thumbnail
       if (!isset($existingthumbs[$thumb->uri])) {
@@ -743,6 +755,8 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
   }
 
   private function moveFile($srcurl, $dsturi) {
+    $unlinksrc = FALSE;
+
     // If the Amazon S3 or Cloud Files module is used, we know that the file is on s3:// or rcf://.
     // We must move the file, because the original must be deleted.
     if ($this->outputdestination == 's3' || $this->outputdestination == 'rcf') {
@@ -755,11 +769,9 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
       if (file_uri_scheme($dsturi) == $this->outputdestination) {
         return rename($srcuri, $dsturi);
       }
-      if (!copy($srcurl, $dsturi)) {
-        return FALSE;
-      }
-      unlink($srcuri);
-      return TRUE;
+
+      // The src file needs to be removed after copying.
+      $unlinksrc = TRUE;
     }
 
     // Check if $srcurl is actually a $uri
@@ -776,7 +788,12 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
       return TRUE;
     }
 
-    return copy($srcuri, $dsturi);
+    $result = copy($srcuri, $dsturi);
+    if ($result && $unlinksrc) {
+      unlink($srcuri);
+    }
+
+    return $result;
   }
 
   /**
@@ -853,5 +870,29 @@ class TranscoderAbstractionFactoryZencoder extends TranscoderAbstractionFactory 
       unset($this->options['input']);
     }
     unset($this->options['output']);
+  }
+
+  /**
+   * Check the current Zencoder API status.
+   */
+  public function getCurrentStatus() {
+    $json = drupal_http_request('http://status.zencoder.com/api/events.json');
+    $message = t('All systems go');
+
+    if ($json->code != 200) {
+      $message = t('The Zencoder Status API URL cannot be retrieved: @error (@code).', array('@code' => $json->code, '@error' => empty($json->error) ? t('unknown error') : $json->error));
+    }
+    else {
+
+      $status_messages = drupal_json_decode($json->data);
+
+      if (!empty($status_messages)) {
+        $last_message = reset($status_messages);
+        $last_event = $last_message['event'];
+        $message = nl2br(t('@status', array('@status' =>  $last_event['description'])));
+      }
+    }
+
+    return $message;
   }
 }

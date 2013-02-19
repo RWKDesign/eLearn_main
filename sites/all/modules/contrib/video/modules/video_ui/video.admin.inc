@@ -50,12 +50,7 @@ function video_preset_admin_settings($form_state) {
     '#submit' => array('video_preset_admin_settings_submit'),
   );
 
-  module_load_include('inc', 'video_ui', 'video.preset');
-  $presets = video_preset_get_presets();
-
-  if (empty($presets)) {
-    drupal_set_message(t('No presets were found. Please use the <a href="@create-preset">Add preset</a> link to create a new Video preset or upload an existing Video preset feature module to your modules directory.', array('@create-preset' => url('admin/config/media/video/presets/add'))), 'warning');
-  }
+  $presets = Preset::getAllPresets();
 
   $form['video_use_preset_wxh'] = array(
     '#type' => 'checkbox',
@@ -73,7 +68,7 @@ function video_preset_admin_settings($form_state) {
 
     foreach ($presets as $preset) {
       $delete = NULL;
-      if (empty($preset['module'])) {
+      if (empty($preset['module']) && !in_array($preset['name'], $selected)) {
         $delete = array('#type' => 'link', '#title' => t('delete'), '#href' => 'admin/config/media/video/presets/preset/' . $preset['name'] . '/delete');
       }
       elseif ($preset['overridden']) {
@@ -90,14 +85,6 @@ function video_preset_admin_settings($form_state) {
         'edit' => array('#type' => 'link', '#title' => t('edit'), '#href' => 'admin/config/media/video/presets/preset/' . $preset['name']),
         'delete' => $delete,
         'export' => array('#type' => 'link', '#title' => t('export'), '#href' => 'admin/config/media/video/presets/preset/' . $preset['name'] . '/export'),
-        /*
-        'weight' => array(
-          '#type' => 'weight',
-          '#title' => t('Weight for @title', array('@title' => $preset['name'])),
-          '#title_display' => 'invisible',
-          '#default_value' => mt_rand(1, 14),
-        ),
-        */
       );
     }
   }
@@ -144,32 +131,34 @@ function theme_video_preset_admin_settings($variables) {
   $header = array(
     array('data' => t('Name')),
     array('data' => t('Description')),
-//    array('data' => t('Weight')),
     array('data' => t('Operations'), 'colspan' => 3),
   );
 
   $rows = array();
-  foreach (element_children($form['video_preset']) as $id) {
-//    $form['video_preset'][$id]['weight']['#attributes']['class'] = array('video-preset-weight');
-    $rows[] = array(
-      'data' => array(
-        drupal_render($form['video_preset'][$id]['status']),
-        drupal_render($form['video_preset'][$id]['description']),
-//        drupal_render($form['video_preset'][$id]['weight']),
-        drupal_render($form['video_preset'][$id]['edit']),
-        drupal_render($form['video_preset'][$id]['delete']),
-        drupal_render($form['video_preset'][$id]['export']),
-      ),
-//      'class' => array('draggable'),
-    );
+
+  if (!empty($form['video_preset'])) {
+    foreach (element_children($form['video_preset']) as $id) {
+      $rows[] = array(
+        'data' => array(
+          drupal_render($form['video_preset'][$id]['status']),
+          drupal_render($form['video_preset'][$id]['description']),
+          drupal_render($form['video_preset'][$id]['edit']),
+          drupal_render($form['video_preset'][$id]['delete']),
+          drupal_render($form['video_preset'][$id]['export']),
+        ),
+      );
+    }
   }
 
   $actions = drupal_render_children($form['actions']);
   $output = drupal_render_children($form);
-  $output .= theme('table', array('header' => $header, 'rows' => $rows, 'attributes' => array('id' => 'video-preset')));
+  $output .= theme('table', array(
+    'header' => $header,
+    'rows' => $rows,
+    'attributes' => array('id' => 'video-preset'),
+    'empty' => t('No presets were found. Please use the <a href="@create-preset">Add preset</a> link to create a new Video preset or upload an existing Video preset feature module to your modules directory.', array('@create-preset' => url('admin/config/media/video/presets/add'))),
+  ));
   $output .= $actions;
-
-//  drupal_add_tabledrag('video-preset', 'order', 'sibling', 'video-preset-weight');
 
   return $output;
 }
@@ -324,6 +313,33 @@ function video_players_admin_settings() {
     }
   }
 
+  // Miscellaneous player settings
+  $form['playersettings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Player settings'),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+  );
+
+  if (module_exists('jw_player')) {
+    $presets = array();
+    foreach (jw_player_preset_load() as $preset => $item) {
+      $presets[$preset] = $item['preset_name'];
+    }
+
+    $form['playersettings']['video_jwplayer_preset'] = array(
+      '#type' => 'select',
+      '#title' => t('JW Player preset'),
+      '#options' => $presets,
+      '#default_value' => variable_get('video_jwplayer_preset', NULL),
+      '#empty_value' => '',
+    );
+  }
+
+  if (count(element_children($form['playersettings'])) == 0) {
+    unset($form['playersettings']);
+  }
+
   return system_settings_form($form);
 }
 
@@ -421,4 +437,52 @@ function video_video_html5_players() {
     $options['videojs'] = t('Video.js');
   }
   return $options;
+}
+
+/**
+ * Page callback that displays FFmpeg information.
+ */
+function video_admin_ffmpeg_info($form_state) {
+  $ffmpegpath = variable_get('video_ffmpeg_path', '/usr/bin/ffmpeg');
+  if (isset($_GET['ffmpegpath'])) {
+    $ffmpegpath = $_GET['ffmpegpath'];
+  }
+
+  $form = array();
+  $form['ffmpegpath'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Path to FFmpeg or avconv executable'),
+    '#default_value' => $ffmpegpath,
+    '#required' => TRUE,
+  );
+
+  $form['actions']['#type'] = 'actions';
+  $form['actions']['submit'] = array('#type' => 'submit', '#value' => t('Show information'));
+
+  if ($ffmpegpath != '') {
+    $transcoder = new PHPVideoToolkit($ffmpegpath, realpath(file_directory_temp()) . '/');
+    $info = $transcoder->getFFmpegInfo(FALSE);
+    $infotxt = var_export($info, TRUE);
+
+    $form['info'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Debug information'),
+      '#default_value' => $infotxt,
+      '#weight' => 1000,
+      '#rows' => min(20, substr_count($infotxt, "\n")),
+    );
+  }
+
+  return $form;
+}
+
+function video_admin_ffmpeg_info_submit($form, &$form_state) {
+  $form_state['redirect'] = array(
+    'admin/config/media/video/ffmpeg-info',
+    array(
+      'query' => array(
+        'ffmpegpath' => $form_state['values']['ffmpegpath'],
+      ),
+    ),
+  );
 }

@@ -120,8 +120,12 @@ function video_field_settings_form($field, $instance, $has_data) {
     'no' => 'Don\'t create thumbnail',
   );
 
+  // When there is no transcoder, the auto option is not available and should not be the default.
   if (!$hastranscoder) {
     unset($thumb_options['auto']);
+    if (!isset($settings['autothumbnail']) || $settings['autothumbnail'] == 'auto') {
+      $settings['autothumbnail'] = 'no';
+    }
   }
 
   $form['autothumbnail'] = array(
@@ -129,7 +133,7 @@ function video_field_settings_form($field, $instance, $has_data) {
     '#title' => t('Video thumbnails'),
     '#options' => $thumb_options,
     '#description' => t('If you choose <i>Automatically extract thumbnails from video</i> then please make sure to configure your !settings to make this work properly.', array('!settings' => l(t('transcoder settings'), 'admin/config/media/video/transcoders'))),
-    '#default_value' => isset($settings['autothumbnail']) ? $settings['autothumbnail'] : 'no',
+    '#default_value' => isset($settings['autothumbnail']) ? $settings['autothumbnail'] : 'auto',
   );
 
   $form['default_video_thumbnail'] = array(
@@ -150,9 +154,8 @@ function video_field_settings_form($field, $instance, $has_data) {
     '#description' => t('This image style will be used to show extracted video thumbnails on video node edit. Extracted thumbnail preview will also use this style.'),
   );
 
-  module_load_include('inc', 'video_ui', 'video.preset');
   $selectedpresets = array_filter(variable_get('video_preset', array()));
-  $presets = video_preset_get_presets();
+  $presets = Preset::getAllPresets();
   $presetnames = array();
   foreach ($presets as $preset) {
     $presetnames[$preset['name']] = $preset['name'];
@@ -577,6 +580,9 @@ function video_field_widget_form(&$form, &$form_state, $field, $instance, $langc
   // Add display_field setting to field because file_field_widget_form() assumes it is set.
   $field['settings']['display_field'] = 0;
 
+  if (module_exists('filefield_role_limit')) {
+    filefield_role_limit_file_field_process($element, $form_state, $form);
+  }
   $elements = file_field_widget_form($form, $form_state, $field, $instance, $langcode, $items, $delta, $element);
   $settings = $instance['settings'];
 
@@ -1107,6 +1113,15 @@ function video_field_formatter_view($entity_type, $entity, $field, $instance, $l
  */
 function video_filefield_sources_widgets() {
   return array('video_upload');
+}
+
+/**
+ * Implements hook_filefield_role_limit_supported_widgets_alter().
+ *
+ * Add the video field to the list of supported FileField Role Limit widgets.
+ */
+function video_filefield_role_limit_supported_widgets_alter(&$types) {
+  $types[] = 'video_upload';
 }
 
 /**

@@ -252,14 +252,14 @@ abstract class CourseObject extends CourseHandler {
     );
 
     $form['title'] = array(
-      '#title' => 'Title',
+      '#title' => t('Title'),
       '#type' => 'textfield',
       '#size' => 100,
       '#default_value' => check_plain($config['title']),
     );
 
     $form['enabled'] = array(
-      '#title' => 'Enabled',
+      '#title' => t('Enabled'),
       '#type' => 'checkbox',
       '#default_value' => $config['enabled'],
     );
@@ -303,14 +303,14 @@ abstract class CourseObject extends CourseHandler {
 
     if ($this->isGraded()) {
       $form['grading'] = array(
-        '#title' => 'Grading',
+        '#title' => t('Grading'),
         '#type' => 'fieldset',
         '#description' => t('Settings for graded objects.'),
       );
 
       $form['grading']['grade_include'] = array(
-        '#title' => 'Include in final course grade',
-        '#description' => 'Include this grade result for calculation of the final course grade.<br/>Currently, only the last grade result per Course will be used.',
+        '#title' => t('Include in final course grade'),
+        '#description' => t('Include this grade result for calculation of the final course grade.<br/>Currently, only the last grade result per Course will be used.'),
         '#default_value' => $config['grade_include'],
         '#type' => 'checkbox',
       );
@@ -319,7 +319,7 @@ abstract class CourseObject extends CourseHandler {
     // Bring in access plugin configuration.
     $form['plugins']['#tree'] = TRUE;
     $form['plugins']['#weight'] = 998;
-    $form['plugins']['access']['#title'] = 'Access plugins';
+    $form['plugins']['access']['#title'] = t('Access plugins');
     $form['plugins']['access']['#type'] = 'fieldset';
     foreach (ctools_get_plugins('course', 'access') as $key => $plugin) {
       $form['plugins']['access']['#tree'] = TRUE;
@@ -569,7 +569,7 @@ abstract class CourseObject extends CourseHandler {
    *
    */
   public function take() {
-    return 'This should be overridden by the module to return course content.';
+    return t('This should be overridden by the module to return course content.');
   }
 
   /**
@@ -1027,8 +1027,8 @@ class CourseObjectFulfillment extends CourseHandler {
     // TODO Please review the conversion of this statement to the D7 database API syntax.
     /* db_query($sql, $this->getId()) */
     db_delete('course_outline_fulfillment')
-  ->condition('cofid', $this->getId())
-  ->execute();
+      ->condition('cofid', $this->getId())
+      ->execute();
   }
 
   /**
@@ -1064,7 +1064,7 @@ abstract class CourseObjectNode extends CourseObject {
    * @return array
    *   An array keyed by machine name of a node type.
    *   return array(
-   *     'my_event' => 'My event content type',
+   *     'my_event' => t('My event content type'),
    *   );
    */
   public abstract function getNodeTypes();
@@ -1135,25 +1135,28 @@ abstract class CourseObjectNode extends CourseObject {
       $types = drupal_map_assoc($this->getNodeTypes());
       $options = array_intersect_key(node_type_get_names(), $types);
       if (count($options) > 1) {
-        $options[''] = '- select -';
+        array_unshift($options, '- select -');
       }
       $form['node_type'] = array(
-        '#title' => 'Create node',
+        '#title' => t('Create node'),
         '#type' => 'select',
         '#options' => $options,
-        '#description' => 'Selecting a node type will automatically create this node and link it to this course object.',
+        '#description' => t('Selecting a node type will automatically create this node and link it to this course object.'),
         '#default_value' => $config['node_type'],
       );
+      if (count($options) > 1) {
+        $form['node_type']['#required'] = TRUE;
+      }
     }
 
     $form['node'] = array(
       '#type' => 'fieldset',
-      '#title' => 'Node',
+      '#title' => t('Node'),
       '#description' => ('Settings for node-based objects.'),
     );
 
     $form['node']['instance'] = array(
-      '#title' => 'Existing node',
+      '#title' => t('Existing node'),
       '#autocomplete_path' => 'course/autocomplete/node/' . implode(',', $this->getNodeTypes()),
       '#type' => 'textfield',
       '#description' => t('Use an existing node instead of creating a new one.'),
@@ -1172,6 +1175,15 @@ abstract class CourseObjectNode extends CourseObject {
       $node = node_load($nid);
       $link = l(t("'%title' [node id %nid]", array('%title' => $node->title, '%nid' => $node->nid)), "node/$node->nid", array('attributes' => array('target' => '_blank', 'title' => t('Open in new window')), 'html' => TRUE));
       $form['node']['instance']['#description'] = t('Currently set to !link', array('!link' => $link));
+    }
+  }
+
+  /**
+   * Validate the options form. Check the node type.
+   */
+  public function optionsValidate(&$form, &$form_state) {
+    if (isset($form_state['values']['node_type']) && empty($form_state['values']['node_type'])) {
+      form_set_error('node_type', t('Please select a node type.'));
     }
   }
 
@@ -1206,7 +1218,7 @@ abstract class CourseObjectNode extends CourseObject {
           '%t' => $this->getTitle(),
           '%c' => $this->getComponent(),
           '!l' => l('Access control', "admin/content/node-type/{$this->getComponent()}/access"),
-        ));
+          ));
       }
     }
     return $warnings;
@@ -1296,6 +1308,14 @@ abstract class CourseObjectNode extends CourseObject {
 
   function getCloneAbility() {
     return t('%object will be cloned as a node. Results may vary.', array('%object' => $this->getTitle()));
+  }
+
+}
+
+class CourseObjectBroken extends CourseObject {
+
+  function take() {
+    return t('This course object is misconfigured. Please contact the administrator.');
   }
 
 }

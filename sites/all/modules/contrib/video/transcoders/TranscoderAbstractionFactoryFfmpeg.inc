@@ -193,7 +193,7 @@ class TranscoderAbstractionFactoryFfmpeg extends TranscoderAbstractionFactory im
           }
         }
         else {
-          $this->transcoder->extractFrame($seek);
+          $this->transcoder->extractFrame($seek, FALSE, '%st');
           $result = $this->transcoder->setOutput(dirname($dstpath) . '/', basename($dstpath), PHPVideoToolkit::OVERWRITE_EXISTING);
           if ($result === PHPVideoToolkit::RESULT_OK) {
             $result = $this->transcoder->execute() === PHPVideoToolkit::RESULT_OK;
@@ -282,12 +282,14 @@ class TranscoderAbstractionFactoryFfmpeg extends TranscoderAbstractionFactory im
       // qt-faststart does not return an error code when it doesn't generate an output file,
       // so also check if the output file has been generated.
       if ($retval == 0 && file_exists($qttmpfile)) {
-        unlink($tmpoutputpath);
+        drupal_unlink($tmpoutputpath);
         rename($qttmpfile, $tmpoutputpath);
       }
       else {
         watchdog('transcoder', 'Error while executing @cmdname on video @filename: @output', array('@cmdname' => 'qt-faststart', '@filename' => $this->realoutputname, '@output' => implode("\n", $output)), WATCHDOG_ERROR);
-        file_delete($qttmpfile);
+        if (file_exists($qttmpfile)) {
+          drupal_unlink($qttmpfile);
+        }
       }
     }
 
@@ -479,15 +481,19 @@ class TranscoderAbstractionFactoryFfmpeg extends TranscoderAbstractionFactory im
     $v =& $form_state['values'];
 
     if (!empty($v['video_ffmpeg_path'])) {
+      $errorhelp = '';
+      if (module_exists('video_ui')) {
+        $errorhelp = '<br/>' . t('Visit the <a href="@ffmpeg-debug-page">FFmpeg debug page</a> for information thay may help you find the cause of this problem.', array('@ffmpeg-debug-page' => url('admin/config/media/video/ffmpeg-info', array('query' => array('ffmpegpath' => $v['video_ffmpeg_path'])))));
+      }
+
       $toolkit = new PHPVideoToolkit($v['video_ffmpeg_path']);
-      PHPVideoToolkit::$ffmpeg_info = FALSE;
       $ffmpeg = $toolkit->getFFmpegInfo(FALSE);
       $ffmpegoravconv = NULL;
       if (!$ffmpeg['ffmpeg-found'] || ($version = self::getVersionFromOutput($ffmpeg['raw'], $ffmpegoravconv)) == NULL) {
-        form_error($form['ffmpeg']['video_ffmpeg_path'], t('FFmpeg not found at %path. To convert videos and create thumbnails you have to install FFmpeg on your server. For more information please see the !documentation.', array('%path' => $v['video_ffmpeg_path'], '!documentation' => l(t('documentation'), 'http://video.heidisoft.com/documentation/ffmpeg-installtion-scripts'))));
+        form_error($form['ffmpeg']['video_ffmpeg_path'], t('FFmpeg not found at %path. To convert videos and create thumbnails you have to install FFmpeg on your server. For more information please see the !documentation.' . $errorhelp, array('%path' => $v['video_ffmpeg_path'], '!documentation' => l(t('documentation'), 'http://video.heidisoft.com/documentation/ffmpeg-installtion-scripts'))));
       }
       elseif (empty($ffmpeg['codecs']['video']) || empty($ffmpeg['codecs']['audio'])) {
-        form_error($form['ffmpeg']['video_ffmpeg_path'], t('FFmpeg version %version was found, but no supported codecs could be found. Please check whether FFmpeg and all support libraries have been installed correctly.', array('%version' => $version)));
+        form_error($form['ffmpeg']['video_ffmpeg_path'], t('FFmpeg version %version was found, but no supported codecs could be found. Please check whether FFmpeg and all support libraries have been installed correctly.' . $errorhelp, array('%version' => $version)));
       }
       else {
         drupal_set_message(t('%ffmpegoravconv version %version found on your system.', array('%version' => $version, '%ffmpegoravconv' => $ffmpegoravconv)), 'status');

@@ -8,6 +8,8 @@
 require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'course') . '/includes/course.outline.inc';
 // Course exporting functions
 require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'course') . '/includes/course.exporting.inc';
+// Rules support
+require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'course') . '/includes/course.rules.inc';
 
 /**
  * Implements hook_menu().
@@ -800,6 +802,13 @@ function course_settings_access($node) {
  * @param object $user The user to check.
  */
 function course_can_take_course($node, $user) {
+  if (!node_access('view', $node)) {
+    return array(array(
+        'success' => FALSE,
+        'header' => t('Access denied'),
+        'message' => t('You do not have permission to take this course.')
+      ));
+  }
   $sql = "SELECT * FROM {course_enrollment} WHERE nid = %d AND uid = %d";
   if ($row = db_query("SELECT * FROM {course_enrollment} WHERE nid = :nid AND uid = :uid", array(':nid' => $node->nid, ':uid' => $user->uid))->fetch()) {
     if ($row->enroll_end > 0 && REQUEST_TIME > $row->enroll_end) {
@@ -871,12 +880,14 @@ function course_node_update($node) {
       $field_exists = isset($settings['field']);
       if ($field_exists) {
         $items = field_get_items('node', $node, $settings['field'], $node->language);
-        $value = $items[0][$settings['value']];
-        if (!empty($value)) {
-          $date = new DateTime("$value UTC");
-          $value = $date->format('U');
+        if (count($items)) {
+          $value = $items[0][$settings['value']];
+          if (!empty($value)) {
+            $date = new DateTime("$value UTC");
+            $value = $date->format('U');
+          }
+          $record[$key] = $value;
         }
-        $record[$key] = $value;
       }
     }
 
@@ -1045,7 +1056,7 @@ function course_enroll($node, $account = NULL, $from = NULL, $code = NULL, $stat
   }
 
   if (course_node_is_course($node)) {
-    $enroll = array(
+    $enrollment = array(
       'nid' => $node->nid,
       'uid' => $account->uid,
       'enrollmenttype' => $from,
@@ -1055,10 +1066,10 @@ function course_enroll($node, $account = NULL, $from = NULL, $code = NULL, $stat
 
     if (isset($node->course['duration']) && $node->course['duration'] > 0) {
       // Set enrollment end to now + the duration of the course.
-      $enroll['enroll_end'] = REQUEST_TIME + $node->course['duration'];
+      $enrollment['enroll_end'] = REQUEST_TIME + $node->course['duration'];
     }
 
-    $enroll = (object) $enroll;
+    $enrollment = (object) $enrollment;
 
     $watchdog_variables = array(
       '!uid' => $account->uid,
@@ -1067,18 +1078,19 @@ function course_enroll($node, $account = NULL, $from = NULL, $code = NULL, $stat
     if (!course_enrollment_check($node->nid, $account->uid)) {
       // User is not enrolled yet.
       watchdog('course_enroll', 'Enrolling user !uid into !nid', $watchdog_variables);
-      course_enrollment_save($enroll);
+      course_enrollment_save($enrollment);
       $op = 'insert';
+      course_rules_invoke_event_by_args("course_enrollment_$op", array('node' => $node, 'user' => $account, 'course_enrollment' => $enrollment));
     }
     else {
       watchdog('course_enroll', 'Re-enrolling user !uid into !nid', $watchdog_variables);
-      // return drupal_write_record('course_enrollment', $enroll, array('nid', 'uid'));
+      // figure out if there's any harm in updating enrollment here.
       $op = 'update';
     }
-    // @todo figure $op out.
+
     // Notify modules about a course enrollment.
     module_invoke_all('course_enroll', $node, $account, $from, $code, $status);
-    return $enroll;
+    return $enrollment;
   }
   else {
     return FALSE;
@@ -1100,6 +1112,7 @@ function course_enroll($node, $account = NULL, $from = NULL, $code = NULL, $stat
  */
 function course_unenroll($node, $user) {
   if (course_node_is_course($node)) {
+    $enrollment = course_enrollment_load($node->nid, $user->uid);
     $course = course_get_course($node, $user);
     $course->unenroll();
 
@@ -1131,6 +1144,7 @@ function course_unenroll($node, $user) {
       '!uid' => $user->uid,
       '!nid' => $node->nid,
     );
+    course_rules_invoke_event_by_args('course_enrollment_delete', array('node' => $node, 'user' => $user, 'course_enrollment' => $enrollment));
     watchdog('course_enroll', 'Removed user !uid from !nid', $watchdog_variables);
     return TRUE;
   }
@@ -1210,96 +1224,93 @@ function course_enable() {
  * @todo move this course node settings form to a secondary local task, under
  * the course settings tab.
  */
-function course_form_alter(&$form, &$form_state, $form_id) {
-  $node = isset($form['#node']) ? $form['#node'] : NULL;
+function course_field_attach_form($entity_type, $entity, &$form, &$form_state, $langcode) {
+  if (!course_node_is_course($entity)) {
+    return;
+  }
 
-  // Course node settings form.
-  if (course_node_is_course($node) && strpos($form_id, '_node_form') !== FALSE) {
-    $form['course']['#tree'] = TRUE;
-    $form['course']['#type'] = 'fieldset';
-    $form['course']['#title'] = t('Course settings');
-    $form['course']['#group'] = 'additional_settings';
-
-    // Course outline display handler.
-    $outlines = array();
-    $handlers = course_get_handlers('outline');
-    foreach ($handlers as $outline_handlers) {
-      if ($outline_handlers) {
-        foreach ($outline_handlers as $key => $outline_handler) {
-          $outlines[$key] = $outline_handler['name'];
-        }
+  $form['course']['#tree'] = TRUE;
+  $form['course']['#type'] = 'fieldset';
+  $form['course']['#title'] = t('Course settings');
+  // Course outline display handler.
+  $outlines = array();
+  $handlers = course_get_handlers('outline');
+  foreach ($handlers as $outline_handlers) {
+    if ($outline_handlers) {
+      foreach ($outline_handlers as $key => $outline_handler) {
+        $outlines[$key] = $outline_handler['name'];
       }
     }
+  }
 
-    $form['course']['outline'] = array(
-      '#title' => t('Available outline displays'),
-      '#type' => 'select',
-      '#options' => $outlines,
+  $form['course']['outline'] = array(
+    '#title' => t('Available outline displays'),
+    '#type' => 'select',
+    '#options' => $outlines,
+  );
+
+  // This is a fake field. It stores the aggregate credit from course_credit.
+  // @todo...something
+  $form['course']['credits'] = array(
+    '#title' => t('Credit hours'),
+    '#type' => 'textfield',
+    '#size' => 4,
+    '#access' => FALSE,
+  );
+
+  $form['course']['duration'] = array(
+    '#title' => t('Duration'),
+    '#type' => 'textfield',
+    '#description' => t('Length of time in seconds that a user can remain in the course. Leave blank for unlimited. For a better experience, install the !link module.', array('!link' => l('Time period', 'http://drupal.org/project/timeperiod'))),
+  );
+
+  if (module_exists('timeperiod')) {
+    $form['course']['duration']['#type'] = 'timeperiod_select';
+    $form['course']['duration']['#units'] = array(
+      '86400' => array('max' => 30, 'step size' => 1),
+      '3600' => array('max' => 24, 'step size' => 1),
+      '60' => array('max' => 60, 'step size' => 1),
     );
+    $form['course']['duration']['#description'] = t('Length of time that a user can remain in the course.');
+  }
 
-    // This is a fake field. It stores the aggregate credit from course_credit.
-    // @todo...something
-    $form['course']['credits'] = array(
-      '#title' => t('Credit hours'),
-      '#type' => 'textfield',
-      '#size' => 4,
-      '#access' => FALSE,
+  $form['course']['cid'] = array(
+    '#title' => t('External learning application course ID'),
+    '#description' => t('If using an external learning application, the ID of the external course.'),
+    '#type' => 'textfield',
+    '#size' => 4,
+    '#access' => FALSE,
+  );
+
+  $form['course']['external_id'] = array(
+    '#title' => t('External course ID'),
+    '#description' => t('Course ID used to relate to an outside system.'),
+    '#type' => 'textfield',
+    '#size' => 16,
+  );
+
+  foreach (element_children($form['course']) as $key) {
+    $form['course'][$key]['#default_value'] = isset($entity->course[$key]) ? $entity->course[$key] : NULL;
+  }
+
+  if (arg(2) == 'clone') {
+    $form['course']['clone_type'] = array(
+      '#title' => t('Course object cloning'),
+      '#description' => t('"New" will create new instances of all course objects.<br/>"Reference" will link supported content in the old course to the new course.<br/>"Clone" will copy supported course objects, otherwise create new ones.'),
+      '#type' => 'radios',
+      '#options' => array(
+        'clone' => 'Clone',
+        'reference' => 'Reference',
+        'new' => 'New',
+      ),
+      '#default_value' => 'clone',
     );
+  }
 
-    $form['course']['duration'] = array(
-      '#title' => t('Duration'),
-      '#type' => 'textfield',
-      '#description' => t('Length of time in seconds that a user can remain in the course. Leave blank for unlimited. For a better experience, install the !link module.', array('!link' => l('Time period', 'http://drupal.org/project/timeperiod'))),
-    );
-
-    if (module_exists('timeperiod')) {
-      $form['course']['duration']['#type'] = 'timeperiod_select';
-      $form['course']['duration']['#units'] = array(
-        '86400' => array('max' => 30, 'step size' => 1),
-        '3600' => array('max' => 24, 'step size' => 1),
-        '60' => array('max' => 60, 'step size' => 1),
-      );
-      $form['course']['duration']['#description'] = t('Length of time that a user can remain in the course.');
-    }
-
-    $form['course']['cid'] = array(
-      '#title' => t('External learning application course ID'),
-      '#description' => t('If using an external learning application, the ID of the external course.'),
-      '#type' => 'textfield',
-      '#size' => 4,
-      '#access' => FALSE,
-    );
-
-    $form['course']['external_id'] = array(
-      '#title' => t('External course ID'),
-      '#description' => t('Course ID used to relate to an outside system.'),
-      '#type' => 'textfield',
-      '#size' => 16,
-    );
-
-    foreach (element_children($form['course']) as $key) {
-      $form['course'][$key]['#default_value'] = isset($node->course[$key]) ? $node->course[$key] : NULL;
-    }
-
-    if (arg(2) == 'clone') {
-      $form['course']['clone_type'] = array(
-        '#title' => t('Course object cloning'),
-        '#description' => t('"New" will create new instances of all course objects.<br/>"Reference" will link supported content in the old course to the new course.<br/>"Clone" will copy supported course objects, otherwise create new ones.'),
-        '#type' => 'radios',
-        '#options' => array(
-          'clone' => 'Clone',
-          'reference' => 'Reference',
-          'new' => 'New',
-        ),
-        '#default_value' => 'clone',
-      );
-    }
-
-    // After creating a new course, redirect the user to the course outline
-    // overview form.
-    if (empty($node->nid)) {
-      $form['buttons']['submit']['#submit'][] = 'course_form_submit';
-    }
+  // After creating a new course, redirect the user to the course outline
+  // overview form.
+  if (empty($node->nid)) {
+    $form['buttons']['submit']['#submit'][] = 'course_form_submit';
   }
 }
 
@@ -1350,7 +1361,7 @@ function course_form_node_type_form_alter(&$form, &$form_state) {
     foreach ($fields as $field) {
       if ($field['module'] == 'date') {
         foreach ($field['columns'] as $column => $value) {
-          if (in_array($form['#node_type']->type, $field['bundles']['node']) && in_array($column, array('value', 'value2'))) {
+          if (!empty($field['bundles']['node']) && in_array($form['#node_type']->type, $field['bundles']['node']) && in_array($column, array('value', 'value2'))) {
             $position = $column == 'value' ? 'From' : 'To';
             // Use the same label pattern as date_api_fields() for consistency
             // with Views, and in case we support other date options than
@@ -1564,8 +1575,14 @@ function course_get_course_object_by_id($coid, $account = NULL, $course = NULL) 
 
   $result = db_query('SELECT * FROM {course_outline} WHERE coid = :coid', array(':coid' => $coid));
   if ($row = $result->fetch()) {
-    $ret = $available[$row->module][$row->object_type];
-    if (!class_exists($ret['class'])) {
+    $object_definition = array();
+    if (!empty($available[$row->module][$row->object_type])) {
+      $object_definition = $available[$row->module][$row->object_type];
+    }
+    if (empty($object_definition['class'])) {
+      $object_definition['class'] = 'CourseObjectBroken';
+    }
+    if (!class_exists($object_definition['class'])) {
       drupal_set_message(t("Could not find class for %m-%c!", array('%m' => $row->module, '%c' => $row->object_type)), 'error');
       return FALSE;
     }
@@ -1573,7 +1590,7 @@ function course_get_course_object_by_id($coid, $account = NULL, $course = NULL) 
       if (!$course) {
         $course = new Course(node_load($row->nid), $account);
       }
-      return new $ret['class']($row, $account, $course);
+      return new $object_definition['class']($row, $account, $course);
     }
   }
   else {
@@ -1681,7 +1698,7 @@ function course_get_course_object($module, $object_type = NULL, $instance = NULL
     $class = $ret['class'];
   }
   else {
-    return FALSE;
+    $class = 'CourseObjectBroken';
   }
 
   $courseObject = new $class($outline_entry, $account, $course);
@@ -1732,8 +1749,16 @@ function course_get_course($node, $account = NULL, $flush = FALSE) {
  * @return bool
  */
 function course_node_is_course($node) {
-  $type = is_object($node) ? $node->type : $node;
-  return variable_get("course_use_{$type}", 0);
+  if (is_object($node)) {
+    if (!isset($node->type)) {
+      return FALSE;
+    }
+    else {
+      $node = $node->type;
+    }
+  }
+
+  return variable_get("course_use_{$node}", 0);
 }
 
 /**
@@ -1762,20 +1787,22 @@ function course_views_api() {
 }
 
 /**
- * Implements hook_content_extra_fields().
+ * Implements hook_field_extra_fields().
  */
-function course_content_extra_fields($type) {
-  $extras = array();
-
-  if (course_node_is_course($type)) {
-    $extras['course'] = array(
-      'label' => t('Course settings'),
-      'description' => t('Course settings and button.'),
-      'weight' => 0,
-    );
+function course_field_extra_fields() {
+  $extra = array();
+  foreach (entity_get_info() as $entity_type => $entity_info) {
+    foreach (array_keys($entity_info['bundles']) as $bundle) {
+      if (in_array($bundle, course_get_types())) {
+        $extra[$entity_type][$bundle]['form']['course'] = array(
+          'label' => t('Course'),
+          'description' => t('Course form elements.'),
+          'weight' => 0,
+        );
+      }
+    }
   }
-
-  return $extras;
+  return $extra;
 }
 
 /**
@@ -1913,7 +1940,10 @@ function course_edit_enrollment_action($object, $context) {
   $enrollment = course_enrollment_load($object->nid, $object->uid);
   $node = node_load($enrollment->nid);
   $account = user_load($enrollment->uid);
-  $course_report = course_report_load($node, $account);
+  if (!$course_report = course_report_load($node, $account)) {
+    $course_report->nid = $node->nid;
+    $course_report->uid = $account->uid;
+  }
 
   // Update enrollment status.
   if ($context['status'] != '') {
@@ -2085,7 +2115,7 @@ function course_edit_enrollment_action_form($a1, $context) {
         -1 => t('Incomplete'),
         0 => t('Failed'),
       ),
-      '#default_value' => $fulfillments[$courseObject->getId()]->isComplete(),
+      '#default_value' => $fulfillments ? $fulfillments[$courseObject->getId()]->isComplete() : NULL,
     );
   }
 
@@ -2264,30 +2294,33 @@ function course_user_type_form_submit(&$form, $form_state) {
  *   A node.
  * @param object $user
  *   A user.
+ * @param bool $all
+ *   Return all values from implementations.
  *
  * @return array
  *   An array with values 'success', to indicate whether or not the user
  *   has permission to self-enroll in this course, and 'message', a
  *   module-provided message that should be displayed to the user.
  */
-function course_enroll_access($node, $user = NULL, $flush = FALSE) {
+function course_enroll_access($node, $user = NULL, $flush = FALSE, $all = FALSE) {
   $courses = &drupal_static(__FUNCTION__, array());
 
   if (!$user) {
     global $user;
   }
 
-  if (!isset($courses[$node->nid]) || $flush) {
-    $courses[$node->nid]['success'] = TRUE;
+  if (!isset($courses[$node->nid]) || $flush || $all) {
+    if ($flush) {
+      $courses = array();
+    }
     // Allow modules to set self-enrollment access for a user.
     $hooks = module_invoke_all('course_can_enroll', $node, $user);
+    if ($all) {
+      return $hooks;
+    }
+    $courses[$node->nid]['success'] = TRUE;
     foreach ($hooks as $key => $hook) {
-      if (!$hook) {
-        // Ok. Old style blocker. But look for messages.
-        $courses[$node->nid] = FALSE;
-      }
       if (is_array($hook) && !$hook['success']) {
-        // New style blocker, return immediately.
         $courses[$node->nid] = $hook;
         return $hook;
       }
@@ -2303,6 +2336,13 @@ function course_enroll_access($node, $user = NULL, $flush = FALSE) {
  * Block enrollments when a course has either not yet started or is expired.
  */
 function course_course_can_enroll($node, $user) {
+  if (!node_access('view', $node)) {
+    return array(array(
+        'success' => FALSE,
+        'header' => t('Access denied'),
+        'message' => t('You do not have permission to enroll into this course'),
+      ));
+  }
   if (!empty($node->course['open']) && REQUEST_TIME < $node->course['open']) {
     return array(array(
         'success' => FALSE,
@@ -2319,6 +2359,15 @@ function course_course_can_enroll($node, $user) {
         'header' => t('Course closed'),
         'message' => t('This course closed on %date and is no longer available for enrollments.', array(
           '%date' => format_date($node->course['close'], 'custom', 'F, jS Y'),
+        )),
+      ));
+  }
+
+  if (!empty($node->course['live_from_date']) && REQUEST_TIME > $node->course['live_from_date']) {
+    return array('course_live_started' => array(
+        'success' => FALSE,
+        'message' => t('This live activity started on %date and is no longer available for enrollments.', array(
+          '%date' => date('F, jS Y', $node->course['live_from_date']),
         )),
       ));
   }
@@ -2408,16 +2457,6 @@ function course_user_cancel($edit, $account, $method) {
       course_unenroll($node, $account);
     }
   }
-}
-
-/**
- * Implements hook_user().
- *
- * Delete the user's course records, fulfillments, and enrollments upon
- * deletion.
- */
-function course_user_OLD($op, &$edit, &$account, $category = NULL) {
-
 }
 
 /**
@@ -2803,10 +2842,10 @@ function course_course_enroll($node, $user, $from) {
   if (!course_report_load($node, $user)) {
     // If we don't have a course report record already, save a new one.
     $entry = (object) array(
-      'nid' => $node->nid,
-      'uid' => $user->uid,
-      'section_name' => 'Enrolled',
-      'complete' => 0,
+        'nid' => $node->nid,
+        'uid' => $user->uid,
+        'section_name' => 'Enrolled',
+        'complete' => 0,
     );
     course_report_save($entry);
   }
@@ -2828,4 +2867,13 @@ function course_report_label($enrollment) {
   $node = node_load($enrollment->nid);
   $account = user_load($enrollment->uid);
   return t("@username's course report for @title", array('@username' => $account->name, '@title' => $node->title));
+}
+
+/**
+ * Trigger a rules event if rules is enabled.
+ */
+function course_rules_invoke_event_by_args($event_name, $args) {
+  if (module_exists('rules')) {
+    rules_invoke_event_by_args($event_name, $args);
+  }
 }

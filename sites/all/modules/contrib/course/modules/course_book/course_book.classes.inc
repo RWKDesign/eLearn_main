@@ -33,15 +33,15 @@ class CourseObjectBook extends CourseObjectNode {
       '#title' => t('Completion criteria'),
       '#type' => 'select',
       '#options' => array(
-        'one' => 'View any page',
-        'all' => 'View all pages',
+        'one' => t('View any page'),
+        'all' => t('View all pages'),
       ),
       '#default_value' => $config['book_tracking'],
     );
 
     // Add a book-specific configuration for course outline list item type, only
     // if the standard course list outline handler is selected.
-    if ($this->getCourse()->getNode()->course['outline'] == 'course_outline_list') {
+    if ($this->getCourse()->getNode()->course['outline'] == 'course') {
       $form['outline_list_item_type'] = array(
         '#title' => t('Course outline list item type'),
         '#type' => 'select',
